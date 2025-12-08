@@ -19,9 +19,8 @@ settings = get_settings()
 
 # Password hashing
 pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-    bcrypt__rounds=settings.BCRYPT_ROUNDS
+    schemes=["argon2"],
+    deprecated="auto"
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -31,7 +30,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    """Hash a password using bcrypt."""
+    """Hash a password using argon2 (no 72-byte limit)."""
     return pwd_context.hash(password)
 
 def create_token(

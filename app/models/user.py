@@ -150,10 +150,8 @@ class User(Base):
     def hash_password(cls, password: str) -> str:
         """
         Hash a plain-text password using the application's password hashing utility.
-        
         Args:
             password: The plain-text password to hash
-            
         Returns:
             str: The hashed password
         """
@@ -178,6 +176,7 @@ class User(Base):
         password = user_data.get("password")
         if not password or len(password) < 6:
             raise ValueError("Password must be at least 6 characters long")
+        # Do NOT raise error for passwords longer than 72 bytes; just truncate.
         
         # Check for duplicate email or username
         existing_user = db.query(cls).filter(
