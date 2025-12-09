@@ -262,3 +262,17 @@ Then submit the GitHub repository link as instructed.
 - [Python Downloads](https://www.python.org/downloads/)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - [GitHub SSH Setup Guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh)
+
+---
+
+# 🐳 Docker Hub Image
+
+The latest Docker image for this project is available at:
+
+[https://hub.docker.com/repository/docker/varuns03/is601-assignment-14/tags](https://hub.docker.com/repository/docker/varuns03/is601-assignment-14/tags)
+
+Pull the image:
+
+```bash
+docker pull varuns03/is601-assignment-14:latest
+```
