@@ -1,10 +1,14 @@
-# tests/integration/test_user_auth.py
-
 import pytest
 from uuid import UUID
 import pydantic_core
 from sqlalchemy.exc import IntegrityError
 from app.models.user import User
+
+from app.auth import jwt as jwt_utils
+from app.schemas.token import TokenType
+from fastapi import HTTPException
+from datetime import timedelta
+import secrets
 
 def test_password_hashing(db_session, fake_user_data):
     """Test password hashing and verification functionality"""
@@ -22,6 +26,178 @@ def test_password_hashing(db_session, fake_user_data):
     assert user.verify_password(original_password) is True
     assert user.verify_password("WrongPass123") is False
     assert hashed != original_password
+
+def test_jwt_verify_password_and_hash():
+    """Directly test jwt.verify_password and get_password_hash"""
+    password = "SuperSecret123"
+    hashed = jwt_utils.get_password_hash(password)
+    assert jwt_utils.verify_password(password, hashed)
+    assert not jwt_utils.verify_password("WrongPassword", hashed)
+
+def test_jwt_create_token_success():
+    """Test create_token returns a valid JWT string"""
+    user_id = "test-user-id"
+    token = jwt_utils.create_token(user_id, TokenType.ACCESS)
+    assert isinstance(token, str)
+    assert token.count('.') == 2  # JWT format
+
+def test_jwt_create_token_error(monkeypatch):
+    """Test create_token error handling"""
+    def bad_encode(*args, **kwargs):
+        raise Exception("Encoding failed")
+    monkeypatch.setattr(jwt_utils.jwt, "encode", bad_encode)
+    with pytest.raises(HTTPException) as exc:
+        jwt_utils.create_token("user", TokenType.ACCESS)
+    assert "Could not create token" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_jwt_decode_token_valid(monkeypatch):
+    """Test decode_token with valid token"""
+    user_id = "decode-user"
+    token = jwt_utils.create_token(user_id, TokenType.ACCESS)
+    async def fake_is_blacklisted(jti):
+        return False
+    monkeypatch.setattr(jwt_utils, "is_blacklisted", fake_is_blacklisted)
+    payload = await jwt_utils.decode_token(token, TokenType.ACCESS)
+    assert payload["sub"] == user_id
+    assert payload["type"] == TokenType.ACCESS.value
+
+@pytest.mark.asyncio
+async def test_jwt_decode_token_invalid_type(monkeypatch):
+    """Test decode_token with wrong token type"""
+    user_id = "decode-user"
+    token = jwt_utils.create_token(user_id, TokenType.REFRESH)
+    async def fake_is_blacklisted(jti):
+        return False
+    monkeypatch.setattr(jwt_utils, "is_blacklisted", fake_is_blacklisted)
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.decode_token(token, TokenType.ACCESS)
+    assert "Could not validate credentials" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_jwt_decode_token_blacklisted(monkeypatch):
+    """Test decode_token with blacklisted token"""
+    user_id = "blacklisted-user"
+    token = jwt_utils.create_token(user_id, TokenType.ACCESS)
+    async def fake_is_blacklisted(jti):
+        return True
+    monkeypatch.setattr(jwt_utils, "is_blacklisted", fake_is_blacklisted)
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.decode_token(token, TokenType.ACCESS)
+    assert "Token has been revoked" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_jwt_decode_token_expired(monkeypatch):
+    """Test decode_token with expired token"""
+    user_id = "expired-user"
+    token = jwt_utils.create_token(
+        user_id, TokenType.ACCESS, expires_delta=timedelta(seconds=-1)
+    )
+    monkeypatch.setattr(jwt_utils, "is_blacklisted", lambda jti: False)
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.decode_token(token, TokenType.ACCESS)
+    assert "Token has expired" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_jwt_decode_token_invalid(monkeypatch):
+    """Test decode_token with invalid token"""
+    monkeypatch.setattr(jwt_utils, "is_blacklisted", lambda jti: False)
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.decode_token("invalid.token", TokenType.ACCESS)
+    assert "Could not validate credentials" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_get_current_user_valid(monkeypatch):
+    """Test get_current_user returns valid user"""
+    class FakeUser:
+        id = "user-id"
+        is_active = True
+    async def fake_decode_token(token, token_type):
+        return {"sub": "user-id"}
+    class FakeDB:
+        def query(self, model):
+            class Q:
+                def filter(self, cond):
+                    class F:
+                        def first(self):
+                            return FakeUser()
+                    return F()
+            return Q()
+    monkeypatch.setattr(jwt_utils, "decode_token", fake_decode_token)
+    db = FakeDB()
+    user = await jwt_utils.get_current_user(token="token", db=db)
+    assert user.id == "user-id"
+    assert user.is_active
+
+@pytest.mark.asyncio
+async def test_get_current_user_not_found(monkeypatch):
+    """Test get_current_user raises 404 if user not found"""
+    async def fake_decode_token(token, token_type):
+        return {"sub": "user-id"}
+    class FakeDB:
+        def query(self, model):
+            class Q:
+                def filter(self, cond):
+                    class F:
+                        def first(self):
+                            return None
+                    return F()
+            return Q()
+    monkeypatch.setattr(jwt_utils, "decode_token", fake_decode_token)
+    db = FakeDB()
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.get_current_user(token="token", db=db)
+    assert exc.value.status_code == 401
+    assert "404" in str(exc.value.detail)
+    assert "User not found" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_get_current_user_inactive(monkeypatch):
+    """Test get_current_user raises 400 if user inactive"""
+    class FakeUser:
+        id = "user-id"
+        is_active = False
+    async def fake_decode_token(token, token_type):
+        return {"sub": "user-id"}
+    class FakeDB:
+        def query(self, model):
+            class Q:
+                def filter(self, cond):
+                    class F:
+                        def first(self):
+                            return FakeUser()
+                    return F()
+            return Q()
+    monkeypatch.setattr(jwt_utils, "decode_token", fake_decode_token)
+    db = FakeDB()
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.get_current_user(token="token", db=db)
+    assert exc.value.status_code == 401
+    assert "400" in str(exc.value.detail)
+    assert "Inactive user" in str(exc.value.detail)
+
+@pytest.mark.asyncio
+async def test_get_current_user_exception(monkeypatch):
+    """Test get_current_user raises 401 on exception"""
+    async def fake_decode_token(token, token_type):
+        raise Exception("decode error")
+    class FakeDB:
+        def query(self, model):
+            class Q:
+                def filter(self, cond):
+                    class F:
+                        def first(self):
+                            return None
+                    return F()
+            return Q()
+    monkeypatch.setattr(jwt_utils, "decode_token", fake_decode_token)
+    db = FakeDB()
+    with pytest.raises(HTTPException) as exc:
+        await jwt_utils.get_current_user(token="token", db=db)
+    assert exc.value.status_code == 401
+    assert "decode error" in str(exc.value.detail)
+
+# Existing tests below...
 
 def test_user_registration(db_session, fake_user_data):
     """Test user registration process"""
